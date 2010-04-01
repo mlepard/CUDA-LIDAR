@@ -122,7 +122,7 @@ main (int argc, char** argv)
       printf("GPU return to point time = \t%f,  threads = %d  blocks = %d\n", cutGetTimerValue (timer2), blockSize.x * blockSize.y, blocks);
       time2 = cutGetTimerValue(timer2);
 
-      printf("Improvement = \t%f\n", time2/time1*100);
+      printf("Improvement = \t%f\n", time1/time2);
 
       cutResetTimer (timer2);
       cutStartTimer (timer2);
