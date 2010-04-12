@@ -52,7 +52,7 @@ write_out_file( const char* output_file,
     {
       for( int kk=0; kk < 32; kk++ )
       {
-        fprintf(ofp, "%f\t%f\t%f\t%f\t%f\n", inputFireArray[ii].firingData[jj].rotInfo/100.0f,
+        fprintf(ofp, "%f\t%f\t%f\t%f\n", inputFireArray[ii].firingData[jj].rotInfo/100.0f,
                                          inputPointArray[ii].firingData[jj].returnData[kk].x,
                                          inputPointArray[ii].firingData[jj].returnData[kk].y,
                                          inputPointArray[ii].firingData[jj].returnData[kk].z );
@@ -105,9 +105,7 @@ main (int argc, char** argv)
     struct lidarPacket    *inputPacketArray;
     struct lidarPacket    *correctedPacketArray;
 
-    struct lidarPacket    *d_inputPacketArray;
     struct correctionData *d_corrDataArray;
-
     //These are optimized data to minimize copy to GPU.
     struct lidarGPUFirePacket *h_packets;
     struct lidarGPUPointPacket  *h_points;
@@ -153,8 +151,6 @@ main (int argc, char** argv)
          }
       }
 
-      //Lets look at memory copy times:
-      cudaMalloc ((void **) &d_inputPacketArray, numPacketsAtOnce*sizeof(struct lidarPacket) );
       cudaMalloc ((void **) &d_packets, numPacketsAtOnce*sizeof(struct lidarGPUFirePacket) );
       cudaMalloc ((void **) &d_points, numPacketsAtOnce*sizeof(struct lidarGPUPointPacket) );
       cudaSucceed("Allocating device memory");
@@ -166,50 +162,17 @@ main (int argc, char** argv)
       cutResetTimer (timer2);
       cutStartTimer (timer2);
 
-      cudaMemcpy ((void *) d_inputPacketArray, (void *) inputPacketArray, 
-                   numPacketsAtOnce*sizeof(struct lidarPacket), cudaMemcpyHostToDevice);
-      cudaThreadSynchronize ();
-      cutStopTimer (timer2);
-      printf("GPU copy full memory = \t\t%f\n", cutGetTimerValue (timer2));
-      time2 = cutGetTimerValue(timer2);
-
-      cutResetTimer (timer2);
-      cutStartTimer (timer2);
       cudaMemcpy ((void *) d_packets, (void *) h_packets, 
                    numPacketsAtOnce*sizeof(struct lidarGPUFirePacket), cudaMemcpyHostToDevice);
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
-      printf("GPU copy optimal memory = \t\t%f\n", cutGetTimerValue (timer2));
       time1 = cutGetTimerValue(timer2);
+      printf("GPU copy optimal memory = \t\t%f\n", cutGetTimerValue (timer2));
 
-      printf("Improvement in copy to device = \t%f\n", time2/time1 );
-
-      //Do the non-optimal return to point conversion.
-      cutResetTimer (timer2);
-      cutStartTimer (timer2);
+      //Do the optimal return to point conversion.
       blockSize.x = 32;
       blockSize.y = 12;
       blocks = numPacketsAtOnce;
-      gpu_convert_all_returns_to_points_2 <<<blocks, blockSize>>> ( d_corrDataArray, d_inputPacketArray );
-      cudaSucceed("GPU returns to points");
-      cudaThreadSynchronize ();
-      cutStopTimer (timer2);
-      printf("GPU return to point time = \t%f,  threads = %d  blocks = %d\n", cutGetTimerValue (timer2), blockSize.x * blockSize.y, blocks);
-      time2 = cutGetTimerValue(timer2);
-
-      cutResetTimer (timer2);
-      cutStartTimer (timer2);
-      cudaMemcpy ((void *) correctedPacketArray, (void *) d_inputPacketArray, 
-                   numPacketsAtOnce*sizeof(struct lidarPacket), cudaMemcpyDeviceToHost);
-      cudaSucceed("Copy device to host");
-      cudaThreadSynchronize ();
-      cutStopTimer (timer2);
-      printf("GPU copy memory back = \t\t%f\n", cutGetTimerValue (timer2));
-      write_out_file( "gpu_out.txt", correctedPacketArray, numPacketsAtOnce );
-      time3 = cutGetTimerValue(timer2);
-
-
-      //Do the optimal return to point conversion.
       cutResetTimer (timer2);
       cutStartTimer (timer2);
       gpu_convert_all_returns_to_points_opt <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
@@ -217,7 +180,17 @@ main (int argc, char** argv)
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
       printf("GPU opt return to point time = \t%f\n", cutGetTimerValue (timer2) );
-      time1 = cutGetTimerValue(timer2);
+      time1 += cutGetTimerValue(timer2);
+      time2 = cutGetTimerValue(timer2);
+
+      cutResetTimer (timer2);
+      cutStartTimer (timer2);
+      gpu_convert_all_returns_to_points_opt_2 <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
+      cudaSucceed("Register GPU returns to points");
+      cudaThreadSynchronize ();
+      cutStopTimer (timer2);
+      printf("GPU register return to point time = \t%f\n", cutGetTimerValue (timer2) );
+      printf("register Improvement = %f\n", time2/cutGetTimerValue(timer2) );
 
       cutResetTimer (timer2);
       cutStartTimer (timer2);
@@ -228,14 +201,10 @@ main (int argc, char** argv)
       cutStopTimer (timer2);
       printf("GPU copy memory back = \t\t%f\n", cutGetTimerValue (timer2));
       write_out_file( "gpu_opt_out.txt", h_points, h_packets, numPacketsAtOnce );
-      time4 = cutGetTimerValue(timer2);
-
-      printf("Improvement in opt time = \t%f\n", time2/time1 );
-      printf("Improvement in copy device to host = \t%f\n", time3/time4 );
-
+      time1 += cutGetTimerValue(timer2);
 
       //cutStopTimer (timer1);
-      //printf("GPU Total time = \t\t%f\n", cutGetTimerValue (timer1));
+      printf("GPU Total time = \t\t%f\n", time1);
 
       parse_data_file( rawFilename, csvFilename, corrDataArray, inputPacketArray, numPacketsAtOnce );
       //Perform CPU returns to point
@@ -246,8 +215,9 @@ main (int argc, char** argv)
       printf ("CPU return to point time = \t%f\n", cutGetTimerValue (timer1));
       write_out_file( "cpu_out.txt", inputPacketArray, numPacketsAtOnce );
 
-
-      cudaFree (d_inputPacketArray);
+      printf("GPU/CPU Improvement = %f\n", cutGetTimerValue(timer1)/time1 );
+      cudaFree (d_packets);
+      cudaFree (d_points);
       numPacketsAtOnce = numPacketsAtOnce*2;
     }
 

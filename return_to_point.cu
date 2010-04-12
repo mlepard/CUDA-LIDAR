@@ -23,6 +23,23 @@ gpu_correct_lidar_return( struct lidarReturn* returnData, struct correctionData 
 }
 
 __device__ void
+gpu_correct_lidar_return_opt_2( unsigned short distance,
+                              float rotCorrection, float vertCorrection, 
+                              float distCorrection, float horizOffsetCorrection,
+                              float vertOffsetCorrection, float lidarRot, 
+                              float* x, float* y, float*z )
+{
+  lidarRot = lidarRot - rotCorrection;
+  float phi = vertCorrection;
+  distance = distance + distCorrection;
+  *x = distance*__cosf(lidarRot/180.0f*PI)*__cosf(phi/180.0f*PI);
+                 + horizOffsetCorrection*__cosf(lidarRot/180.0f*PI);
+  *y = distance*__sinf(lidarRot/180.0f*PI)*__cosf(phi/180.0f*PI);
+                 + horizOffsetCorrection*__sinf(lidarRot/180.0f*PI);
+  *z = distance*__sinf(phi/180.0f*PI) + vertOffsetCorrection;
+}
+
+__device__ void
 gpu_correct_lidar_return_opt( const struct lidarGPUReturn* returnData, const struct correctionData corrInfo, 
                               float lidarRot, struct lidarGPUPoint* pointData)
 {
@@ -37,43 +54,31 @@ gpu_correct_lidar_return_opt( const struct lidarGPUReturn* returnData, const str
 }
 
 __global__ void
-gpu_convert_all_returns_to_points_2( struct correctionData d_corrDataArray[], 
-                                     struct lidarPacket d_inputPacketArray[] )
+gpu_convert_all_returns_to_points_opt_2( const struct correctionData d_corrDataArray[], 
+                                     const struct lidarGPUFirePacket d_inputPacketArray[],
+                                     struct lidarGPUPointPacket  d_outputPointArray[] )
 {
-  __shared__ struct correctionData s_corrData[32];
-  __shared__ struct lidarPacket  s_packetData;
-  unsigned int packetId = blockIdx.x;
-  unsigned int firingId = threadIdx.y;
-  unsigned int returnId = threadIdx.x;
+  __shared__ struct lidarGPUPointPacket  s_pointData;
 
-  struct lidarFiringData *s_pFireData = &(s_packetData.firingData[firingId]);
-  struct lidarFiringData *g_pFireData = &(d_inputPacketArray[packetId].firingData[firingId]);
+  struct lidarGPUPointReturn *g_pPointData = &(d_outputPointArray[blockIdx.x].firingData[threadIdx.y]);
+  float x,y,z;
 
-  bool isUpper = d_inputPacketArray[packetId].firingData[firingId].info == 0xEEFF;
-  float currentRotation =  d_inputPacketArray[packetId].firingData[firingId].rotInfo;
+  bool isUpper = d_inputPacketArray[blockIdx.x].firingData[threadIdx.y].info == 0xEEFF;
+  float currentRotation =  d_inputPacketArray[blockIdx.x].firingData[threadIdx.y].rotInfo;
 
-  unsigned int corrId = (isUpper) ? returnId : returnId+32;
+  unsigned int corrId = (isUpper) ? threadIdx.x : threadIdx.x+32;
 
-  //copy global correction and fire data to shared info.
-  s_corrData[returnId].rotCorrection = d_corrDataArray[corrId].rotCorrection;  
-  s_corrData[returnId].vertCorrection = d_corrDataArray[corrId].vertCorrection;  
-  s_corrData[returnId].distCorrection = d_corrDataArray[corrId].distCorrection;  
-  s_corrData[returnId].vertOffsetCorrection = d_corrDataArray[corrId].vertOffsetCorrection;  
-  s_corrData[returnId].horizOffsetCorrection = d_corrDataArray[corrId].horizOffsetCorrection;
-
-  s_pFireData->returnData[returnId].distance = g_pFireData->returnData[returnId].distance;
-  s_pFireData->returnData[returnId].intensity = g_pFireData->returnData[returnId].intensity;
-
-  gpu_correct_lidar_return( &(s_pFireData->returnData[returnId]), s_corrData[returnId], currentRotation/100.0f );
+  //use registers to keep minimize memory transfer
+  gpu_correct_lidar_return_opt_2( d_inputPacketArray[blockIdx.x].firingData[threadIdx.y].returnData[threadIdx.x].distance, 
+                                  d_corrDataArray[corrId].rotCorrection,
+                                d_corrDataArray[corrId].vertCorrection, d_corrDataArray[corrId].distCorrection,
+                                d_corrDataArray[corrId].horizOffsetCorrection, d_corrDataArray[corrId].vertOffsetCorrection,
+                                currentRotation/100.0f, &x, &y, &z );
 
   //copy corrected return data back to the global input array
-  g_pFireData->returnData[returnId].x = s_pFireData->returnData[returnId].x;
-  g_pFireData->returnData[returnId].y = s_pFireData->returnData[returnId].y;
-  g_pFireData->returnData[returnId].z = s_pFireData->returnData[returnId].z;
-  g_pFireData->returnData[returnId].phi = s_pFireData->returnData[returnId].phi;
-  g_pFireData->returnData[returnId].theta = s_pFireData->returnData[returnId].theta;
-  g_pFireData->returnData[returnId].distance = s_pFireData->returnData[returnId].distance;
-
+  g_pPointData->returnData[threadIdx.x].x = x;
+  g_pPointData->returnData[threadIdx.x].y = y;
+  g_pPointData->returnData[threadIdx.x].z = z;
 }
 
 __global__ void
