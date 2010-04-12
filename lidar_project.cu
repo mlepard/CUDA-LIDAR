@@ -175,22 +175,28 @@ main (int argc, char** argv)
       blocks = numPacketsAtOnce;
       cutResetTimer (timer2);
       cutStartTimer (timer2);
-      gpu_convert_all_returns_to_points_opt <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
-      cudaSucceed("Opt GPU returns to points");
+      gpu_convert_all_returns_to_points_opt_3 <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
+      cudaSucceed("fast math GPU returns to points");
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
       printf("GPU opt return to point time = \t%f\n", cutGetTimerValue (timer2) );
       time1 += cutGetTimerValue(timer2);
       time2 = cutGetTimerValue(timer2);
 
+      cudaMemcpy ((void *) h_points, (void *) d_points, 
+                   numPacketsAtOnce*sizeof(struct lidarGPUPointPacket), cudaMemcpyDeviceToHost);
+      cudaSucceed("Copy device to host");
+      cudaThreadSynchronize ();
+      //write_out_file( "gpu_slow_out.txt", h_points, h_packets, numPacketsAtOnce );
+
       cutResetTimer (timer2);
       cutStartTimer (timer2);
       gpu_convert_all_returns_to_points_opt_2 <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
-      cudaSucceed("Register GPU returns to points");
+      cudaSucceed("slow math GPU returns to points");
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
-      printf("GPU register return to point time = \t%f\n", cutGetTimerValue (timer2) );
-      printf("register Improvement = %f\n", time2/cutGetTimerValue(timer2) );
+      printf("GPU slow math return to point time = \t%f\n", cutGetTimerValue (timer2) );
+      printf("fast math Improvement = %f\n", time2/cutGetTimerValue(timer2) );
 
       cutResetTimer (timer2);
       cutStartTimer (timer2);
@@ -200,7 +206,7 @@ main (int argc, char** argv)
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
       printf("GPU copy memory back = \t\t%f\n", cutGetTimerValue (timer2));
-      write_out_file( "gpu_opt_out.txt", h_points, h_packets, numPacketsAtOnce );
+      write_out_file( "gpu_fast_out.txt", h_points, h_packets, numPacketsAtOnce );
       time1 += cutGetTimerValue(timer2);
 
       //cutStopTimer (timer1);
