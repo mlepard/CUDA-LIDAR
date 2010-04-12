@@ -5,6 +5,36 @@
 
 #define NUM_LIDAR_SENSORS 64
 
+struct lidarGPUReturn {
+  unsigned short distance;
+  char intensity;
+};
+
+struct lidarGPUPoint {
+  float x;
+  float y;
+  float z;
+};
+
+struct lidarGPUPointReturn {
+  struct lidarGPUPoint  returnData[32];
+};
+
+struct lidarGPUPointPacket {
+  struct lidarGPUPointReturn  firingData[12];
+};
+
+
+struct lidarGPUFireData {
+  unsigned short      info;
+  unsigned short      rotInfo;
+  struct lidarGPUReturn  returnData[32];
+};
+
+struct lidarGPUFirePacket {
+  struct lidarGPUFireData  firingData[12];
+};  
+
 struct lidarReturn {
   unsigned short distance;
   char intensity;

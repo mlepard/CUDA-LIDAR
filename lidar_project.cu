@@ -15,6 +15,51 @@ typedef unsigned char uchar;
 #include "cuda_utils.cu"
 #include "return_to_point.cu"
 
+void
+write_out_file( const char* output_file, 
+                struct lidarPacket inputPacketArray[], int numPacketsToWrite )
+{
+  FILE *ofp;
+  char *mode = "w";  
+  ofp = fopen(output_file, mode);
+  for( int ii=0; ii < numPacketsToWrite; ii++ )
+  {
+    for( int jj=0; jj < 12; jj++ )
+    {
+      for( int kk=0; kk < 32; kk++ )
+      {
+        fprintf(ofp, "%f\t%f\t%f\t%f\n", inputPacketArray[ii].firingData[jj].rotInfo/100.0f,
+                                         inputPacketArray[ii].firingData[jj].returnData[kk].x,
+                                         inputPacketArray[ii].firingData[jj].returnData[kk].y,
+                                         inputPacketArray[ii].firingData[jj].returnData[kk].z );
+      }
+    }
+  }
+}
+
+void
+write_out_file( const char* output_file, 
+                struct lidarGPUPointPacket inputPointArray[], 
+                struct lidarGPUFirePacket inputFireArray[], 
+                int numPacketsToWrite )
+{
+  FILE *ofp;
+  char *mode = "w";  
+  ofp = fopen(output_file, mode);
+  for( int ii=0; ii < numPacketsToWrite; ii++ )
+  {
+    for( int jj=0; jj < 12; jj++ )
+    {
+      for( int kk=0; kk < 32; kk++ )
+      {
+        fprintf(ofp, "%f\t%f\t%f\t%f\t%f\n", inputFireArray[ii].firingData[jj].rotInfo/100.0f,
+                                         inputPointArray[ii].firingData[jj].returnData[kk].x,
+                                         inputPointArray[ii].firingData[jj].returnData[kk].y,
+                                         inputPointArray[ii].firingData[jj].returnData[kk].z );
+      }
+    }
+  }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
@@ -26,7 +71,7 @@ main (int argc, char** argv)
     int threads_block;
     int blocks;
     dim3 blockSize;
-    float time1, time2, time3;
+    float time1, time2, time3, time4;
 
     unsigned int timer1, timer2;
     // load image from disk
@@ -63,53 +108,83 @@ main (int argc, char** argv)
     struct lidarPacket    *d_inputPacketArray;
     struct correctionData *d_corrDataArray;
 
+    //These are optimized data to minimize copy to GPU.
+    struct lidarGPUFirePacket *h_packets;
+    struct lidarGPUPointPacket  *h_points;
+    struct lidarGPUFirePacket *d_packets;
+    struct lidarGPUPointPacket  *d_points;
+
     //First malloc on cuda seems to take a LONG time...
     //This Malloc only needs to occur once, doesn't change with number fo packets to parse.
+    parse_correction_file(dbFilename, corrDataArray);
     cudaMalloc ((void **) &d_corrDataArray,    NUM_LIDAR_SENSORS*sizeof(struct correctionData) );
+    cudaMemcpy ((void *) d_corrDataArray, (void *) corrDataArray, 
+                 NUM_LIDAR_SENSORS*sizeof(struct correctionData), cudaMemcpyHostToDevice);  
+    cudaSucceed("Copy correction data to device");
 
-    while( numPacketsAtOnce < 5000 )
+    while( numPacketsAtOnce < 50 )
     {
       printf("%d packets\n", numPacketsAtOnce );
 
+      //create the unoptimized packet arrays for CPU and GPU
       inputPacketArray = (struct lidarPacket*)malloc( numPacketsAtOnce*sizeof(struct lidarPacket) );
       correctedPacketArray = (struct lidarPacket*)malloc( numPacketsAtOnce*sizeof(struct lidarPacket) );
 
-      parse_correction_file(dbFilename, corrDataArray);
+      //create the optimized transfer packet array
+      h_packets = (struct lidarGPUFirePacket*)malloc(numPacketsAtOnce*sizeof(struct lidarGPUFirePacket));
+      h_points = (struct lidarGPUPointPacket*)malloc(numPacketsAtOnce*sizeof(struct lidarGPUPointPacket));
+
       parse_data_file( rawFilename, csvFilename, corrDataArray, inputPacketArray, numPacketsAtOnce );
 
-      //Perform GPU returns to point
+      //Copy data from the unoptimized packet structure to our optimized packet structure.
+      //We wouldn't normally do this, but since we're testing different ways to do things it's fine.
+      //Once we find the best way to transfer data we'd use that strucutre only.
+      for( int ii=0; ii < numPacketsAtOnce; ii++ )
+      {
+         for( int jj=0; jj < 12; jj++ )
+         {
+           h_packets[ii].firingData[jj].info = inputPacketArray[ii].firingData[jj].info;
+           h_packets[ii].firingData[jj].rotInfo = inputPacketArray[ii].firingData[jj].rotInfo;
+           for( int kk = 0; kk < 32; kk++ )
+           {
+             h_packets[ii].firingData[jj].returnData[kk].distance = inputPacketArray[ii].firingData[jj].returnData[kk].distance;
+             h_packets[ii].firingData[jj].returnData[kk].intensity = inputPacketArray[ii].firingData[jj].returnData[kk].intensity;
+           }
+         }
+      }
+
+      //Lets look at memory copy times:
+      cudaMalloc ((void **) &d_inputPacketArray, numPacketsAtOnce*sizeof(struct lidarPacket) );
+      cudaMalloc ((void **) &d_packets, numPacketsAtOnce*sizeof(struct lidarGPUFirePacket) );
+      cudaMalloc ((void **) &d_points, numPacketsAtOnce*sizeof(struct lidarGPUPointPacket) );
+      cudaSucceed("Allocating device memory");
+      cudaThreadSynchronize ();
+
+      //Start timing when we copy data across to device
       cutResetTimer (timer1);
       cutStartTimer (timer1);
       cutResetTimer (timer2);
       cutStartTimer (timer2);
 
-      cudaMalloc ((void **) &d_inputPacketArray, numPacketsAtOnce*sizeof(struct lidarPacket) );
-      cudaSucceed("Allocating device memory");
-      cudaThreadSynchronize ();
-
       cudaMemcpy ((void *) d_inputPacketArray, (void *) inputPacketArray, 
                    numPacketsAtOnce*sizeof(struct lidarPacket), cudaMemcpyHostToDevice);
-      cudaMemcpy ((void *) d_corrDataArray, (void *) corrDataArray, 
-                   NUM_LIDAR_SENSORS*sizeof(struct correctionData), cudaMemcpyHostToDevice);  
-      cudaSucceed("Copy host to device");
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
-      printf("GPU copy memory = \t\t%f\n", cutGetTimerValue (timer2));
+      printf("GPU copy full memory = \t\t%f\n", cutGetTimerValue (timer2));
+      time2 = cutGetTimerValue(timer2);
 
       cutResetTimer (timer2);
       cutStartTimer (timer2);
-      threads_block = 32;
-      blocks = numPacketsAtOnce*12;
-      gpu_convert_all_returns_to_points <<<blocks, threads_block>>> ( d_corrDataArray, d_inputPacketArray );
-      cudaSucceed("GPU returns to points");
+      cudaMemcpy ((void *) d_packets, (void *) h_packets, 
+                   numPacketsAtOnce*sizeof(struct lidarGPUFirePacket), cudaMemcpyHostToDevice);
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
-      printf("GPU return to point time = \t%f,  threads = %d  blocks = %d\n", cutGetTimerValue (timer2), threads_block, blocks);
+      printf("GPU copy optimal memory = \t\t%f\n", cutGetTimerValue (timer2));
       time1 = cutGetTimerValue(timer2);
 
-      //cutStopTimer (timer1);
-      //printf("GPU Total time = \t\t%f\n", cutGetTimerValue (timer1));
+      printf("Improvement in copy to device = \t%f\n", time2/time1 );
 
+      //Do the non-optimal return to point conversion.
       cutResetTimer (timer2);
       cutStartTimer (timer2);
       blockSize.x = 32;
@@ -122,8 +197,6 @@ main (int argc, char** argv)
       printf("GPU return to point time = \t%f,  threads = %d  blocks = %d\n", cutGetTimerValue (timer2), blockSize.x * blockSize.y, blocks);
       time2 = cutGetTimerValue(timer2);
 
-      printf("Improvement = \t%f\n", time1/time2);
-
       cutResetTimer (timer2);
       cutStartTimer (timer2);
       cudaMemcpy ((void *) correctedPacketArray, (void *) d_inputPacketArray, 
@@ -132,21 +205,52 @@ main (int argc, char** argv)
       cudaThreadSynchronize ();
       cutStopTimer (timer2);
       printf("GPU copy memory back = \t\t%f\n", cutGetTimerValue (timer2));
+      write_out_file( "gpu_out.txt", correctedPacketArray, numPacketsAtOnce );
+      time3 = cutGetTimerValue(timer2);
+
+
+      //Do the optimal return to point conversion.
+      cutResetTimer (timer2);
+      cutStartTimer (timer2);
+      gpu_convert_all_returns_to_points_opt <<<blocks, blockSize>>> ( d_corrDataArray, d_packets, d_points );
+      cudaSucceed("Opt GPU returns to points");
+      cudaThreadSynchronize ();
+      cutStopTimer (timer2);
+      printf("GPU opt return to point time = \t%f\n", cutGetTimerValue (timer2) );
+      time1 = cutGetTimerValue(timer2);
+
+      cutResetTimer (timer2);
+      cutStartTimer (timer2);
+      cudaMemcpy ((void *) h_points, (void *) d_points, 
+                   numPacketsAtOnce*sizeof(struct lidarGPUPointPacket), cudaMemcpyDeviceToHost);
+      cudaSucceed("Copy device to host");
+      cudaThreadSynchronize ();
+      cutStopTimer (timer2);
+      printf("GPU copy memory back = \t\t%f\n", cutGetTimerValue (timer2));
+      write_out_file( "gpu_opt_out.txt", h_points, h_packets, numPacketsAtOnce );
+      time4 = cutGetTimerValue(timer2);
+
+      printf("Improvement in opt time = \t%f\n", time2/time1 );
+      printf("Improvement in copy device to host = \t%f\n", time3/time4 );
+
 
       //cutStopTimer (timer1);
       //printf("GPU Total time = \t\t%f\n", cutGetTimerValue (timer1));
 
-
+      parse_data_file( rawFilename, csvFilename, corrDataArray, inputPacketArray, numPacketsAtOnce );
       //Perform CPU returns to point
       cutResetTimer (timer1);
       cutStartTimer (timer1);
       cpu_convert_all_returns_to_points( corrDataArray, inputPacketArray, numPacketsAtOnce );
       cutStopTimer (timer1);
       printf ("CPU return to point time = \t%f\n", cutGetTimerValue (timer1));
+      write_out_file( "cpu_out.txt", inputPacketArray, numPacketsAtOnce );
+
 
       cudaFree (d_inputPacketArray);
       numPacketsAtOnce = numPacketsAtOnce*2;
     }
 
+    
     return 0;
 }
